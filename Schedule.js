@@ -189,7 +189,7 @@ function activeElapsed(lastBeatEpoch, nowEpoch) {
   return gap > 0 && gap <= SLEEP_GAP_MS ? gap : 0
 }
 
-// A missing, stale or too-large remainingMs (new install, pre-fork config,
+// A missing, stale or too-large remainingMs (new install, older lastChangeEpoch config,
 // interval just lowered) falls back to a full interval.
 function startingRemaining(config) {
   var full = intervalMs(config)

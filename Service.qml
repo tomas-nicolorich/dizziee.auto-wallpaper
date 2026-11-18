@@ -144,7 +144,7 @@ Item {
     }
     root.lastError = ""
     var config = Schedule.normalize(parsed)
-    // A brand-new or pre-fork config has no remainingMs; start a full interval
+    // A brand-new or older (lastChangeEpoch) config has no remainingMs; start a full interval
     // so the first change doesn't fire right after install.
     config.remainingMs = Schedule.startingRemaining(config)
     root.enabled = config.enabled
