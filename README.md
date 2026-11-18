@@ -50,7 +50,10 @@ Configuration lives in `~/.config/omarchy/auto-wallpaper/config.json`.
 ## How it works
 
 - **Sequential** advances to the next wallpaper, wrapping at the end.
-- **Shuffle** plays every wallpaper once before repeating.
+- **Shuffle** plays every wallpaper once before repeating, then starts a new
+  random order (never opening with the wallpaper that just played).
+- The countdown only runs while you're using the machine: suspend, shutdown
+  and logout pause it instead of triggering a change the moment you're back.
 - Manual picks and scheduled changes share the same rotation.
 - Changing the active theme resets the rotation and waits one interval.
 - Previews reuse Omarchy's own wallpaper thumbnail cache, so the panel stays

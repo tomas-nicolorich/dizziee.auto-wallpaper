@@ -4,7 +4,7 @@ var DEFAULTS = {
   enabled: true,
   intervalMinutes: 30,
   mode: "sequential",
-  lastChangeEpoch: 0,
+  remainingMs: 0,
   cycle: [],
   cycleIndex: 0,
   cycleTheme: ""
@@ -27,13 +27,18 @@ function mode(value, fallback) {
   return value === MODE_SHUFFLE ? MODE_SHUFFLE : MODE_SEQUENTIAL
 }
 
+function remaining(value) {
+  var parsed = Number(value)
+  return isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0
+}
+
 function normalize(raw) {
   var source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
   return {
     enabled: typeof source.enabled === "boolean" ? source.enabled : DEFAULTS.enabled,
     intervalMinutes: interval(source.intervalMinutes, DEFAULTS.intervalMinutes),
     mode: mode(source.mode, DEFAULTS.mode),
-    lastChangeEpoch: integer(source.lastChangeEpoch, DEFAULTS.lastChangeEpoch),
+    remainingMs: remaining(source.remainingMs),
     cycle: Array.isArray(source.cycle) ? source.cycle.slice() : [],
     cycleIndex: integer(source.cycleIndex, DEFAULTS.cycleIndex),
     cycleTheme: typeof source.cycleTheme === "string" ? source.cycleTheme : ""
@@ -132,7 +137,19 @@ function pickNext(config, catalog, currentPath, theme, rng) {
     if (cycle.length <= 1)
       return { path: "", cycle: cycle, cycleIndex: cycleIndex, changed: false }
 
-    var nextShuffle = (cycleIndex + 1) % cycle.length
+    var nextShuffle = cycleIndex + 1
+    if (nextShuffle >= cycle.length) {
+      // Every wallpaper has been shown once: start a fresh random order
+      // instead of replaying the same one, and don't open the new round with
+      // the wallpaper that just ended the old one.
+      cycle = shuffle(paths, rng)
+      if (cycle[0] === currentPath) {
+        var first = cycle[0]
+        cycle[0] = cycle[1]
+        cycle[1] = first
+      }
+      nextShuffle = 0
+    }
     return {
       path: cycle[nextShuffle],
       cycle: cycle,
@@ -153,23 +170,48 @@ function pickNext(config, catalog, currentPath, theme, rng) {
   }
 }
 
+// The countdown only runs while the session is awake. `remainingMs` is the
+// active time left; the service subtracts the time since its last heartbeat
+// (`lastBeatEpoch`, kept in memory only). A gap longer than SLEEP_GAP_MS means
+// the machine was suspended or the shell wasn't running (logged out), so that
+// gap doesn't count: the countdown pauses across it instead of firing an
+// overdue change the moment the machine wakes.
+var HEARTBEAT_MS = 60000
+var SLEEP_GAP_MS = HEARTBEAT_MS * 3
+
+function intervalMs(config) {
+  return (config.intervalMinutes || 0) * 60000
+}
+
+// Active time elapsed since the last heartbeat, ignoring suspend/logout gaps.
+function activeElapsed(lastBeatEpoch, nowEpoch) {
+  var gap = nowEpoch - lastBeatEpoch
+  return gap > 0 && gap <= SLEEP_GAP_MS ? gap : 0
+}
+
+// A missing, stale or too-large remainingMs (new install, pre-fork config,
+// interval just lowered) falls back to a full interval.
+function startingRemaining(config) {
+  var full = intervalMs(config)
+  return config.remainingMs > 0 && config.remainingMs <= full ? config.remainingMs : full
+}
+
+function remainingAt(config, lastBeatEpoch, nowEpoch) {
+  return Math.max(0, config.remainingMs - activeElapsed(lastBeatEpoch, nowEpoch))
+}
+
 // Is a scheduled change due right now?
-function isDue(config, nowEpoch) {
+function isDue(config, lastBeatEpoch, nowEpoch) {
   if (!config.enabled) return false
-  var last = config.lastChangeEpoch > 0 ? config.lastChangeEpoch : 0
-  var elapsed = nowEpoch - last
-  if (elapsed < 0) elapsed = 0
-  return elapsed >= (config.intervalMinutes || 0) * 60000
+  return remainingAt(config, lastBeatEpoch, nowEpoch) <= 0
 }
 
 // Whole minutes until the next scheduled change (ceil). -1 when automation off.
-function minutesUntil(config, nowEpoch) {
+function minutesUntil(config, lastBeatEpoch, nowEpoch) {
   if (!config.enabled) return -1
-  var last = config.lastChangeEpoch > 0 ? config.lastChangeEpoch : 0
-  var intervalMs = (config.intervalMinutes || 0) * 60000
-  var remaining = intervalMs - (nowEpoch - last)
-  if (remaining < 1) remaining = 1
-  return Math.ceil(remaining / 60000)
+  var left = remainingAt(config, lastBeatEpoch, nowEpoch)
+  if (left < 1) left = 1
+  return Math.ceil(left / 60000)
 }
 
 function modeLabel(modeValue) {

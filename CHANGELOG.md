@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Shuffle starts a fresh random order after every wallpaper has played,
+  instead of replaying the same order.
+- The schedule countdown pauses while the machine is suspended, off, or
+  logged out. Config stores `remainingMs` in place of `lastChangeEpoch`.
+
 ### Fixed
 
 - Wallpapers reached through symlinked backgrounds folders now use Omarchy's
