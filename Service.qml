@@ -33,11 +33,7 @@ Item {
   property bool enabled: true
   property int intervalMinutes: 30
   property string mode: Schedule.DEFAULTS.mode
-  property double remainingMs: Schedule.DEFAULTS.remainingMs
-  // When remainingMs was last measured. In memory only: every config load
-  // (shell start, login) measures from "now", so time spent logged out or
-  // with the shell stopped never counts toward the countdown.
-  property double lastBeatEpoch: 0
+  property double lastChangeEpoch: Schedule.DEFAULTS.lastChangeEpoch
   property var cycle: []
   property int cycleIndex: 0
   property string cycleTheme: ""
@@ -116,7 +112,7 @@ Item {
       enabled: root.enabled,
       intervalMinutes: root.intervalMinutes,
       mode: root.mode,
-      remainingMs: root.remainingMs,
+      lastChangeEpoch: root.lastChangeEpoch,
       cycle: root.cycle,
       cycleIndex: root.cycleIndex,
       cycleTheme: root.cycleTheme
@@ -139,19 +135,20 @@ Item {
         // FileView watches it and calls this again.
         root.lastError = "Invalid config.json: " + error
         root.loaded = false
+        scheduleTimer.running = false
         return
       }
     }
     root.lastError = ""
     var config = Schedule.normalize(parsed)
-    // A brand-new or older (lastChangeEpoch) config has no remainingMs; start a full interval
-    // so the first change doesn't fire right after install.
-    config.remainingMs = Schedule.startingRemaining(config)
+    // A brand-new config has lastChangeEpoch 0; without this, the very first
+    // load would be "due" immediately and switch the wallpaper right after
+    // install. Start the clock now so the first change waits one full interval.
+    if (config.enabled && config.lastChangeEpoch <= 0) config.lastChangeEpoch = Date.now()
     root.enabled = config.enabled
     root.intervalMinutes = config.intervalMinutes
     root.mode = config.mode
-    root.remainingMs = config.remainingMs
-    root.lastBeatEpoch = Date.now()
+    root.lastChangeEpoch = config.lastChangeEpoch
     root.cycle = config.cycle
     root.cycleIndex = config.cycleIndex
     root.cycleTheme = config.cycleTheme
@@ -160,19 +157,8 @@ Item {
     Qt.callLater(root.reconcile)
   }
 
-  function liveRemaining() {
-    return Schedule.remainingAt(root.currentConfig(), root.lastBeatEpoch, Date.now())
-  }
-
-  function fullInterval() {
-    return Schedule.intervalMs(root.currentConfig())
-  }
-
   function saveConfig(patch) {
     var config = root.currentConfig()
-    // Persist the countdown as of now; applyConfig() then restarts the
-    // measurement from now, so no active time is lost or double counted.
-    config.remainingMs = root.liveRemaining()
     for (var key in patch) config[key] = patch[key]
     config = Schedule.normalize(config)
     var text = JSON.stringify(config, null, 2) + "\n"
@@ -218,7 +204,7 @@ Item {
     if (!root.enabled) return strings.t("wallpaper.off")
     var target = root.peekNext()
     if (!target) return strings.t("wallpaper.noOther")
-    var minutes = Schedule.minutesUntil(root.currentConfig(), root.lastBeatEpoch, root.nowEpoch)
+    var minutes = Schedule.minutesUntil(root.currentConfig(), root.nowEpoch)
     var prefix = minutes > 0 ? strings.t("wallpaper.min").arg(fmtInt(minutes)) : strings.t("wallpaper.now")
     return strings.t("wallpaper.nextIn").arg(prefix).arg(Schedule.wallpaperName(target))
   }
@@ -240,7 +226,7 @@ Item {
     } else {
       root.lastAction = root.catalogPaths.length > 0
         ? strings.t("wallpaper.onlyOne") : strings.t("wallpaper.noWallpapers")
-      root.saveConfig({ remainingMs: root.fullInterval() })
+      root.saveConfig({ lastChangeEpoch: Date.now() })
     }
   }
 
@@ -264,18 +250,41 @@ Item {
   }
 
   function reconcile() {
-    if (!root.loaded || root.busy) return
+    if (!root.loaded || root.busy) {
+      root.armScheduleTimer()
+      return
+    }
     root.nowEpoch = Date.now()
-    if (!root.enabled) return
-    if (Schedule.isDue(root.currentConfig(), root.lastBeatEpoch, root.nowEpoch)) root.applyNext()
+    if (!root.enabled) {
+      root.armScheduleTimer()
+      return
+    }
+    if (Schedule.isDue(root.currentConfig(), root.nowEpoch)) root.applyNext()
+    root.armScheduleTimer()
   }
 
-  // One heartbeat: persist the countdown (saveConfig measures active time
-  // since the last beat and skips suspend gaps), then reconcile() switches
-  // the wallpaper if it's due.
-  function beat() {
-    if (!root.loaded || root.busy) return
-    root.saveConfig({})
+  function msUntilDue() {
+    if (!root.enabled) return -1
+    var intervalMs = (root.intervalMinutes || 0) * 60000
+    var last = root.lastChangeEpoch > 0 ? root.lastChangeEpoch : 0
+    return intervalMs - (Date.now() - last)
+  }
+
+  // Wake exactly when the next change is due instead of every minute; a
+  // disabled or not-yet-loaded service never wakes. Config edits, theme
+  // changes and completed switches all flow back through reconcile(), so the
+  // arm stays correct without any other call sites.
+  function armScheduleTimer() {
+    if (!root.loaded || !root.enabled) {
+      scheduleTimer.running = false
+      return
+    }
+    var remaining = root.msUntilDue()
+    if (!(remaining > 0)) remaining = 1
+    // Floor avoids a hot loop if the clock jumps; the cap bounds one-shot
+    // waits for long intervals (up to 24h).
+    scheduleTimer.interval = Math.max(10000, Math.min(remaining, 86400000))
+    scheduleTimer.restart()
   }
 
   function onThemeChanged(slug) {
@@ -290,7 +299,7 @@ Item {
     if (!root.loaded) return
     // New theme, new wallpaper set: let the user see it before any scheduled
     // switch, and let pickNext rebuild the shuffle cycle on the next change.
-    root.saveConfig({ remainingMs: root.fullInterval(), cycle: [], cycleTheme: "" })
+    root.saveConfig({ lastChangeEpoch: Date.now(), cycle: [], cycleTheme: "" })
     root.lastAction = strings.t("wallpaper.themeChanged").arg(root.currentThemeDisplay)
     // Warm thumbnails too: if the panel is open while the theme changes, the
     // grid must not fall back to full-resolution previews.
@@ -305,7 +314,7 @@ Item {
       // Start the next schedule interval and keep the shuffle cycle aligned
       // with whichever wallpaper we just showed.
       var next = root.pendingNext
-      var patch = { remainingMs: root.fullInterval(), cycleTheme: root.currentTheme }
+      var patch = { lastChangeEpoch: Date.now(), cycleTheme: root.currentTheme }
       if (next) {
         patch.cycle = next.cycle
         patch.cycleIndex = next.cycleIndex
@@ -413,16 +422,14 @@ Item {
     onExited: function(exitCode) { root.onSetExited(exitCode) }
   }
 
-  // Fixed heartbeat instead of a one-shot timer sized to the interval: a
-  // wall-clock deadline would fire as soon as the machine wakes from a long
-  // suspend, while counting down per beat lets sleep pause the countdown.
-  // Changes land up to one beat (1 min) after they're due.
   Timer {
     id: scheduleTimer
-    interval: Schedule.HEARTBEAT_MS
-    running: root.loaded && root.enabled
+    interval: 60000
+    running: false
     repeat: true
-    onTriggered: root.beat()
+    // Armed by reconcile() to fire exactly when the next change is due;
+    // never runs while disabled or unloaded.
+    onTriggered: root.reconcile()
   }
 
   FileView {

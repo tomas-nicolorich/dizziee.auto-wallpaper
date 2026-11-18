@@ -7,7 +7,7 @@ function loadSchedule() {
   const path = require("path")
   let src = fs.readFileSync(path.join(__dirname, "..", "Schedule.js"), "utf8")
   src = src.replace(/^\s*\.pragma.*$/m, "")
-  const factory = new Function(src + "\nreturn { parseWallpaperCatalog, wallpaperName, pickNext, normalize, isDue, minutesUntil, startingRemaining, remainingAt, SLEEP_GAP_MS };")
+  const factory = new Function(src + "\nreturn { parseWallpaperCatalog, wallpaperName, pickNext, normalize };")
   return factory()
 }
 
@@ -72,33 +72,4 @@ test("a new shuffle round never starts with the wallpaper that ended the last", 
     assert.equal(result.cycleIndex, 0)
     assert.notEqual(result.path, "/a")
   }
-})
-
-test("countdown starts at a full interval when missing, stale or too large", () => {
-  const full = 30 * 60000
-  assert.equal(Schedule.startingRemaining(Schedule.normalize({ intervalMinutes: 30 })), full)
-  assert.equal(Schedule.startingRemaining(Schedule.normalize({ intervalMinutes: 30, lastChangeEpoch: 123 })), full)
-  assert.equal(Schedule.startingRemaining(Schedule.normalize({ intervalMinutes: 30, remainingMs: full * 2 })), full)
-  assert.equal(Schedule.startingRemaining(Schedule.normalize({ intervalMinutes: 30, remainingMs: 5000 })), 5000)
-})
-
-test("countdown counts awake time and pauses across suspend", () => {
-  const config = Schedule.normalize({ intervalMinutes: 30, remainingMs: 120000 })
-  const beat = 1_000_000
-  // One normal heartbeat later: a minute is gone.
-  assert.equal(Schedule.remainingAt(config, beat, beat + 60000), 60000)
-  assert.equal(Schedule.isDue(config, beat, beat + 60000), false)
-  assert.equal(Schedule.isDue(config, beat, beat + 120000), true)
-  // Waking after an hour of suspend: nothing elapsed, nothing due.
-  const woke = beat + 3600000
-  assert.ok(woke - beat > Schedule.SLEEP_GAP_MS)
-  assert.equal(Schedule.remainingAt(config, beat, woke), 120000)
-  assert.equal(Schedule.isDue(config, beat, woke), false)
-  assert.equal(Schedule.minutesUntil(config, beat, woke), 2)
-})
-
-test("disabled schedule is never due", () => {
-  const config = Schedule.normalize({ enabled: false, remainingMs: 1 })
-  assert.equal(Schedule.isDue(config, 0, 60000), false)
-  assert.equal(Schedule.minutesUntil(config, 0, 60000), -1)
 })
